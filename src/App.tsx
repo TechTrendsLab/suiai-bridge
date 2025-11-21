@@ -7,16 +7,8 @@ import { parseUnits, pad, formatUnits, type Hex } from 'viem';
 import { SURGE_BRIDGE_EXECUTOR_ADDRESS, SURGE_BRIDGE_EXECUTOR_ABI, ERC20_ABI, WORMHOLE_ABI, SURGE_TOKEN_ADDRESS, WORMHOLE_CORE_ADDRESS } from './config/contracts';
 import { lock } from './sui_contract';
 import { callBridgeAPI, checkBackendHealth } from './config/backend';
+import { networkConfig } from './suiNetworkConfig';
 
-
-// Sui Network Config (from your sui_surge_web/src/networkConfig.ts)
-const SUI_NETWORK_CONFIG = {
-  testnet: {
-    packageId: "0xb1ef5fb760a44fc8783437985b4295dc8ac4db4a07a1b90c2fc01c53115cd347",
-    state: "0x31358d198147da50db32eda2562951d53973a0c0ad5ed738e9b17d88b213d790", // Wormhole State
-    bridgeState: "0x61d9dbd5b4091ca45c9ede2dbcb1bd88469e870f1aaa2de2d9ce98036519b43f" // Surge Bridge State
-  }
-};
 
 interface WalletMenuProps {
   address: string;
@@ -262,7 +254,7 @@ function App() {
     const fetchSuiBalance = async () => {
       if (suiAccount && suiClient && sourceChain === 'Sui') {
         try {
-          const surgeCoinType = `${SUI_NETWORK_CONFIG.testnet.packageId}::surge::SURGE`;
+          const surgeCoinType = `${networkConfig.testnet.packageId}::surge::SURGE`;
           const { totalBalance } = await suiClient.getBalance({
             owner: suiAccount.address,
             coinType: surgeCoinType
@@ -457,8 +449,20 @@ function App() {
     ? (balance && decimals ? formatUnits(balance, decimals) : '0')
     : (formatUnits(BigInt(suiBalance), 9)); // Assuming 9 decimals for Sui SURGE, change to 18 if your move contract uses 18
 
+  // Loading Overlay Component
+  const LoadingOverlay = () => (
+    <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex flex-col items-center justify-center text-white p-4">
+      <Loader2 className="w-16 h-16 text-[#6366f1] animate-spin mb-4" />
+      <h2 className="text-2xl font-bold mb-2">Processing Transaction</h2>
+      <p className="text-gray-300 text-center max-w-md animate-pulse">{txStatus}</p>
+      <div className="mt-8 text-xs text-gray-500">Please do not close this window</div>
+    </div>
+  );
+
   return (
     <div className="min-h-screen bg-[#020205] text-white flex items-center justify-center p-4 font-sans">
+      {isLoading && <LoadingOverlay />}
+      
       <div className="w-full max-w-[480px] bg-[#0f1014] p-6 rounded-3xl border border-white/5 shadow-2xl">
         {/* Header */}
         <div className="flex justify-between items-center mb-8">
