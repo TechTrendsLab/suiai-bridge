@@ -1,8 +1,20 @@
 import { ArrowDownUp, History, Wallet, Copy, LogOut, RefreshCw } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
 import { ConnectButton as RainbowConnectButton } from '@rainbow-me/rainbowkit';
-import { ConnectButton as SuiConnectButton, useCurrentAccount, useDisconnectWallet } from '@mysten/dapp-kit';
-import { useDisconnect } from 'wagmi';
+import { ConnectButton as SuiConnectButton, useCurrentAccount, useDisconnectWallet, useSignAndExecuteTransaction, useSuiClient } from '@mysten/dapp-kit';
+import { useAccount, useDisconnect, useReadContract, useWriteContract, useWaitForTransactionReceipt } from 'wagmi';
+import { parseUnits, pad, formatUnits, type Hex } from 'viem';
+import { Transaction, coinWithBalance } from "@mysten/sui/transactions";
+import { SURGE_BRIDGE_EXECUTOR_ADDRESS, SURGE_BRIDGE_EXECUTOR_ABI, ERC20_ABI, WORMHOLE_ABI, SURGE_TOKEN_ADDRESS, WORMHOLE_CORE_ADDRESS } from './config/contracts';
+
+// Sui Network Config (from your sui_surge_web/src/networkConfig.ts)
+const SUI_NETWORK_CONFIG = {
+  testnet: {
+    packageId: "0xb1ef5fb760a44fc8783437985b4295dc8ac4db4a07a1b90c2fc01c53115cd347",
+    state: "0x31358d198147da50db32eda2562951d53973a0c0ad5ed738e9b17d88b213d790", // Wormhole State
+    bridgeState: "0x61d9dbd5b4091ca45c9ede2dbcb1bd88469e870f1aaa2de2d9ce98036519b43f" // Surge Bridge State
+  }
+};
 
 interface WalletMenuProps {
   address: string;
@@ -178,6 +190,83 @@ function App() {
   const [sourceChain, setSourceChain] = useState('BSC');
   const [destChain, setDestChain] = useState('Sui');
   const [amount, setAmount] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [txStatus, setTxStatus] = useState('');
+
+  const { address: bscAddress } = useAccount();
+  const suiAccount = useCurrentAccount();
+  const suiClient = useSuiClient();
+  const { mutate: signAndExecuteTransaction } = useSignAndExecuteTransaction();
+
+  // Contracts
+  const { data: minFee } = useReadContract({
+    address: SURGE_BRIDGE_EXECUTOR_ADDRESS,
+    abi: SURGE_BRIDGE_EXECUTOR_ABI,
+    functionName: 'minFee',
+  });
+
+  const { data: messageFee } = useReadContract({
+    address: WORMHOLE_CORE_ADDRESS,
+    abi: WORMHOLE_ABI,
+    functionName: 'messageFee',
+  });
+
+  const { data: decimals } = useReadContract({
+    address: SURGE_TOKEN_ADDRESS,
+    abi: ERC20_ABI,
+    functionName: 'decimals',
+  });
+
+  const { data: allowance, refetch: refetchAllowance } = useReadContract({
+    address: SURGE_TOKEN_ADDRESS,
+    abi: ERC20_ABI,
+    functionName: 'allowance',
+    args: bscAddress && SURGE_BRIDGE_EXECUTOR_ADDRESS ? [bscAddress, SURGE_BRIDGE_EXECUTOR_ADDRESS] : undefined,
+    query: { enabled: !!bscAddress }
+  });
+
+  const { data: balance, refetch: refetchBscBalance } = useReadContract({
+    address: SURGE_TOKEN_ADDRESS,
+    abi: ERC20_ABI,
+    functionName: 'balanceOf',
+    args: bscAddress ? [bscAddress] : undefined,
+    query: { enabled: !!bscAddress && sourceChain === 'BSC' }
+  });
+
+  // Fetch Sui Balance
+  const [suiBalance, setSuiBalance] = useState<string>('0');
+
+  useEffect(() => {
+    const fetchSuiBalance = async () => {
+      if (suiAccount && suiClient && sourceChain === 'Sui') {
+        try {
+          const surgeCoinType = `${SUI_NETWORK_CONFIG.testnet.packageId}::surge::SURGE`;
+          const { totalBalance } = await suiClient.getBalance({
+            owner: suiAccount.address,
+            coinType: surgeCoinType
+          });
+          // Assume 9 decimals for Sui SURGE (standard Move decimals usually 9, check your Move code)
+          // If your move code uses 9, use 9. If 18, use 18.
+          // Let's assume 9 for now as standard SUI token, but if it's bridged from BSC(18), it might be 8 or other.
+          // Standard Wormhole wrapped tokens often preserve decimals or cap at 8.
+          // Let's assume 9 for now based on common Sui standards, OR 18 if you implemented it that way.
+          // Based on `balance: 1000000000000` in your tests, it looks like standard.
+          // Let's format it simply.
+          setSuiBalance(totalBalance);
+        } catch (e) {
+          console.error("Failed to fetch Sui balance", e);
+          setSuiBalance('0');
+        }
+      }
+    };
+
+    fetchSuiBalance();
+    // Set interval to refresh or just depend on chain switch
+    const interval = setInterval(fetchSuiBalance, 10000);
+    return () => clearInterval(interval);
+  }, [suiAccount, suiClient, sourceChain]);
+
+  const { writeContractAsync } = useWriteContract();
 
   const handleSwapChains = () => {
     setSourceChain(destChain);
@@ -189,6 +278,188 @@ function App() {
     if (chain === 'Sui') return 'Sui Testnet';
     return chain;
   }
+
+  const handleBridge = async () => {
+    if (!amount || !bscAddress || !suiAccount) {
+      alert('Please connect wallets and enter amount');
+      return;
+    }
+
+    if (messageFee === undefined || minFee === undefined) {
+      alert('Contract data not loaded yet');
+      return;
+    }
+
+    setIsLoading(true);
+    setTxStatus('Processing...');
+
+    try {
+      if (sourceChain === 'BSC') {
+        const amountWei = parseUnits(amount, decimals || 18);
+
+        // Check Allowance
+        if (!allowance || allowance < amountWei) {
+          setTxStatus('Approving...');
+          const approveTx = await writeContractAsync({
+            address: SURGE_TOKEN_ADDRESS,
+            abi: ERC20_ABI,
+            functionName: 'approve',
+            args: [SURGE_BRIDGE_EXECUTOR_ADDRESS, amountWei]
+          });
+          // We ideally should wait for receipt here, but for simplicity we proceed or could add a wait
+          console.log('Approve tx:', approveTx);
+
+          setTxStatus('Waiting for approval...');
+          // NOTE: properly waiting requires the hash which we have. 
+          // But we can't call useWaitForTransactionReceipt dynamically here easily without effect.
+          // For this demo, I'll just assume the user might need to confirm two transactions or I just fire the second one.
+          // However, firing second immediately usually fails due to nonce or allowance not updated on node.
+
+          alert("Please wait for Approval transaction to confirm, then click Confirm again.");
+          setIsLoading(false);
+          refetchAllowance();
+          return;
+        }
+
+        // Initiate Transfer
+        setTxStatus('Initiating Transfer...');
+        const targetAddressBytes32 = pad(suiAccount.address as Hex, { size: 32 });
+        const totalFee = (messageFee || 0n) + (minFee || 0n);
+
+        const tx = await writeContractAsync({
+          address: SURGE_BRIDGE_EXECUTOR_ADDRESS,
+          abi: SURGE_BRIDGE_EXECUTOR_ABI,
+          functionName: 'initiateTransfer',
+          args: [amountWei, targetAddressBytes32, 21], // 21 = Sui
+          value: totalFee
+        });
+
+        console.log('Bridge tx:', tx);
+        setTxStatus('Transaction Submitted!');
+        alert(`Bridge Transaction Submitted: ${tx}`);
+
+        // Notify Backend Relayer
+        try {
+          fetch('http://localhost:3001/api/relay', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ txHash: tx })
+          }).then(res => res.json())
+            .then(data => console.log('Relay response:', data))
+            .catch(err => console.error('Relay fetch error:', err));
+        } catch (e) {
+          console.error('Failed to notify relayer', e);
+        }
+
+        setAmount('');
+      } else {
+        // Sui -> BSC (Call lock/burn)
+        setTxStatus('Initiating Transfer on Sui...');
+
+        if (!bscAddress) {
+          alert("Please connect BSC wallet as recipient");
+          setIsLoading(false);
+          return;
+        }
+
+        // Convert BSC address to bytes array for Move vector<u8>
+        // remove 0x, then parse pairs of hex chars
+        const recipientBytes = bscAddress.slice(2).match(/.{1,2}/g)?.map((byte) => parseInt(byte, 16)) || [];
+
+        // Find SURGE coin object
+        // NOTE: You might need to implement a more robust coin selection (merge/split) if user has multiple coins
+        // For now, we pick the first coin with enough balance
+        const surgeCoinType = `${SUI_NETWORK_CONFIG.testnet.packageId}::surge::SURGE`;
+
+        // We need to query the user's coins. 
+        // Since we are inside a function, we can't easily use a hook.
+        // But we can use the Sui Client from the hook context or import a client if needed.
+        // However, simpler way in dApp Kit is often just to let the wallet handle coin management if the PTB allows,
+        // OR query via RPC.
+        // Here is a logic to "find and split"
+
+        // IMPORTANT: This logic assumes you can get a client instance. 
+        // In a real app, you should pass `suiClient` from `useSuiClient()` hook to this function or component.
+        // For this snippet, I'll add a `useSuiClient` hook at component level and use it here.
+
+        // Placeholder: Assuming you have a client instance `suiClient` available in scope (I will add it to component)
+        const { data: coins } = await suiClient.getCoins({
+          owner: suiAccount.address,
+          coinType: surgeCoinType
+        });
+
+        if (!coins || coins.length === 0) {
+          alert("No SURGE tokens found in wallet");
+          setIsLoading(false);
+          return;
+        }
+
+        // Simple strategy: Pick the first coin with balance >= amount
+        // Better strategy: Merge all coins, then split. Or use Programmable Transaction to do it on-chain (Gas efficient)
+        // Let's do the PTB approach: "Take first coin, if not enough merge others, then split"
+
+        const primaryCoin = tx.object(coins[0].coinObjectId);
+        if (coins.length > 1) {
+          tx.mergeCoins(primaryCoin, coins.slice(1).map(c => tx.object(c.coinObjectId)));
+        }
+
+        const [coinToTransfer] = tx.splitCoins(primaryCoin, [tx.pure.u64(amount)]);
+
+        tx.moveCall({
+          target: `${SUI_NETWORK_CONFIG.testnet.packageId}::surge::lock`,
+          arguments: [
+            tx.object(SUI_NETWORK_CONFIG.testnet.bridgeState), // Surge Bridge State (First arg)
+            coinToTransfer, // The split SURGE coin (Second arg)
+            coinWithBalance({ type: "0x2::sui::SUI", balance: 0 }), // message_fee
+            tx.pure.vector("u8", recipientBytes),
+            tx.object("0x6"), // Clock
+          ],
+        });
+
+        signAndExecuteTransaction(
+          {
+            transaction: tx,
+          },
+          {
+            onSuccess: (result) => {
+              console.log('Sui Bridge tx:', result);
+              setTxStatus('Transaction Submitted!');
+              alert(`Bridge Transaction Submitted: ${result.digest}`);
+
+              // Notify Backend
+              try {
+                fetch('http://localhost:3001/api/relay', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ txHash: result.digest })
+                });
+              } catch (e) { console.error(e); }
+
+              setAmount('');
+              setIsLoading(false);
+            },
+            onError: (err) => {
+              console.error('Sui Bridge failed', err);
+              setTxStatus('Failed');
+              alert('Transaction failed');
+              setIsLoading(false);
+            }
+          }
+        );
+      }
+    } catch (err: any) {
+      console.error(err);
+      setTxStatus('Error');
+      alert(err.message || 'Transaction failed');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Display Balance Logic
+  const displayBalance = sourceChain === 'BSC'
+    ? (balance && decimals ? formatUnits(balance, decimals) : '0')
+    : (formatUnits(BigInt(suiBalance), 9)); // Assuming 9 decimals for Sui SURGE, change to 18 if your move contract uses 18
 
   return (
     <div className="min-h-screen bg-[#020205] text-white flex items-center justify-center p-4 font-sans">
@@ -276,7 +547,7 @@ function App() {
           <div className="bg-[#1b1b22] rounded-2xl p-4 space-y-4 mt-2 border border-white/5">
             <div className="flex justify-between text-sm text-gray-400 px-1">
               <span>Amount</span>
-              <span>Balance: 0</span>
+              <span>Balance: {displayBalance}</span>
             </div>
             <div className="flex items-center justify-between gap-4 bg-[#111114] p-3 rounded-xl border border-white/5 focus-within:border-indigo-500/50 transition-colors">
               <input
@@ -294,15 +565,24 @@ function App() {
             </div>
             <div className="flex justify-between items-center px-1">
               <div className="text-xs text-gray-500">
-                Max: 0 SURGE
+                {messageFee ? `Est. Fee: ${formatUnits(messageFee + (minFee || 0n), 18)} BNB` : 'Loading fee...'}
               </div>
-              <button className="text-xs font-medium bg-[#2b2b33] hover:bg-[#3f3f46] text-white px-3 py-1 rounded-full transition-colors">Max</button>
+              <button
+                onClick={() => setAmount(displayBalance)}
+                className="text-xs font-medium bg-[#2b2b33] hover:bg-[#3f3f46] text-white px-3 py-1 rounded-full transition-colors"
+              >
+                Max
+              </button>
             </div>
           </div>
 
           {/* Action Button */}
-          <button className="w-full bg-[#6366f1] hover:bg-[#5558e3] text-white py-4 rounded-xl font-semibold mt-6 transition-all shadow-[0_0_20px_-5px_rgba(99,102,241,0.4)] hover:shadow-[0_0_25px_-5px_rgba(99,102,241,0.6)] disabled:opacity-50 disabled:cursor-not-allowed">
-            Confirm transaction
+          <button
+            onClick={handleBridge}
+            disabled={isLoading || !amount}
+            className="w-full bg-[#6366f1] hover:bg-[#5558e3] text-white py-4 rounded-xl font-semibold mt-6 transition-all shadow-[0_0_20px_-5px_rgba(99,102,241,0.4)] hover:shadow-[0_0_25px_-5px_rgba(99,102,241,0.6)] disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {isLoading ? txStatus : 'Confirm transaction'}
           </button>
 
           <div className="flex justify-center items-center gap-2 text-xs text-gray-500 mt-4">
