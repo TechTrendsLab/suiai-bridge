@@ -191,7 +191,7 @@ function ChainWalletConnect({ chainType }: { chainType: string }) {
 function App() {
   const [sourceChain, setSourceChain] = useState('BSC');
   const [destChain, setDestChain] = useState('Sui');
-  const [amount, setAmount] = useState(0);
+  const [amount, setAmount] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [txStatus, setTxStatus] = useState('');
   const [backendOnline, setBackendOnline] = useState(true);
@@ -302,8 +302,10 @@ function App() {
   }
 
   const handleBridge = async () => {
-    if (!amount || !bscAddress || !suiAccount) {
-      alert('Please connect wallets and enter amount');
+    const amountNum = parseFloat(amount);
+    
+    if (!amount || isNaN(amountNum) || amountNum <= 0 || !bscAddress || !suiAccount) {
+      alert('Please connect wallets and enter a valid amount');
       return;
     }
 
@@ -317,7 +319,7 @@ function App() {
 
     try {
       if (sourceChain === 'BSC') {
-        const amountWei = parseUnits(amount.toString(), decimals || 9);
+        const amountWei = parseUnits(amount, decimals || 9);
 
         // Check Allowance
         if (!allowance || allowance < amountWei) {
@@ -372,7 +374,7 @@ function App() {
               explorerUrl: result.data.explorerUrl
             });
             alert(`跨链成功!\n源交易: ${tx}\n目标交易: ${result.data.targetTxHash}\n\n查看详情: ${result.data.explorerUrl}`);
-            setAmount(0);
+            setAmount('');
             refetchBscBalance();
           } else {
             throw new Error(result.error || '后端处理失败');
@@ -396,7 +398,7 @@ function App() {
         // remove 0x, then parse pairs of hex chars
         const recipientBytes = bscAddress.slice(2).match(/.{1,2}/g)?.map((byte) => parseInt(byte, 16)) || [];
 
-        const tx = await lock(suiAccount.address, amount, recipientBytes);
+        const tx = await lock(suiAccount.address, amountNum, recipientBytes);
 
         signAndExecuteTransaction(
           {
@@ -420,7 +422,7 @@ function App() {
                     explorerUrl: bridgeResult.data.explorerUrl
                   });
                   alert(`跨链成功!\n源交易: ${result.digest}\n目标交易: ${bridgeResult.data.targetTxHash}\n\n查看详情: ${bridgeResult.data.explorerUrl}`);
-                  setAmount(0);
+                  setAmount('');
                 } else {
                   throw new Error(bridgeResult.error || '后端处理失败');
                 }
@@ -561,10 +563,17 @@ function App() {
             </div>
             <div className="flex items-center justify-between gap-4 bg-[#111114] p-3 rounded-xl border border-white/5 focus-within:border-indigo-500/50 transition-colors">
               <input
-                type="number"
+                type="text"
+                inputMode="decimal"
                 placeholder="0"
                 value={amount}
-                onChange={(e) => setAmount(Number(e.target.value))}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  // 只允许数字和小数点
+                  if (value === '' || /^\d*\.?\d*$/.test(value)) {
+                    setAmount(value);
+                  }
+                }}
                 className="bg-transparent text-2xl font-medium outline-none w-full placeholder-gray-600"
               />
               <div className="flex items-center gap-2 bg-[#1b1b22] px-3 py-1.5 rounded-full cursor-pointer hover:bg-[#27272e] transition-colors border border-white/5">
@@ -578,7 +587,7 @@ function App() {
                 {messageFee ? `Est. Fee: ${formatUnits(messageFee + (minFee || 0n), 18)} BNB` : 'Loading fee...'}
               </div>
               <button
-                onClick={() => setAmount(Number(displayBalance))}
+                onClick={() => setAmount(displayBalance)}
                 className="text-xs font-medium bg-[#2b2b33] hover:bg-[#3f3f46] text-white px-3 py-1 rounded-full transition-colors"
               >
                 Max
@@ -611,7 +620,7 @@ function App() {
           {/* Action Button */}
           <button
             onClick={handleBridge}
-            disabled={isLoading || !amount || !backendOnline}
+            disabled={isLoading || !amount || parseFloat(amount) <= 0 || isNaN(parseFloat(amount)) || !backendOnline}
             className="w-full bg-[#6366f1] hover:bg-[#5558e3] text-white py-4 rounded-xl font-semibold mt-6 transition-all shadow-[0_0_20px_-5px_rgba(99,102,241,0.4)] hover:shadow-[0_0_25px_-5px_rgba(99,102,241,0.6)] disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
           >
             {isLoading && <Loader2 className="w-4 h-4 animate-spin" />}
