@@ -4,8 +4,9 @@ import { ConnectButton as RainbowConnectButton } from '@rainbow-me/rainbowkit';
 import { ConnectButton as SuiConnectButton, useCurrentAccount, useDisconnectWallet, useSignAndExecuteTransaction, useSuiClient } from '@mysten/dapp-kit';
 import { useAccount, useDisconnect, useReadContract, useWriteContract, useWaitForTransactionReceipt } from 'wagmi';
 import { parseUnits, pad, formatUnits, type Hex } from 'viem';
-import { Transaction, coinWithBalance } from "@mysten/sui/transactions";
 import { SURGE_BRIDGE_EXECUTOR_ADDRESS, SURGE_BRIDGE_EXECUTOR_ABI, ERC20_ABI, WORMHOLE_ABI, SURGE_TOKEN_ADDRESS, WORMHOLE_CORE_ADDRESS } from './config/contracts';
+import { lock } from './sui_contract';
+
 
 // Sui Network Config (from your sui_surge_web/src/networkConfig.ts)
 const SUI_NETWORK_CONFIG = {
@@ -189,7 +190,7 @@ function ChainWalletConnect({ chainType }: { chainType: string }) {
 function App() {
   const [sourceChain, setSourceChain] = useState('BSC');
   const [destChain, setDestChain] = useState('Sui');
-  const [amount, setAmount] = useState('');
+  const [amount, setAmount] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
   const [txStatus, setTxStatus] = useState('');
 
@@ -295,7 +296,7 @@ function App() {
 
     try {
       if (sourceChain === 'BSC') {
-        const amountWei = parseUnits(amount, decimals || 18);
+        const amountWei = parseUnits(amount.toString(), decimals || 9);
 
         // Check Allowance
         if (!allowance || allowance < amountWei) {
@@ -351,7 +352,7 @@ function App() {
           console.error('Failed to notify relayer', e);
         }
 
-        setAmount('');
+        setAmount(0);
       } else {
         // Sui -> BSC (Call lock/burn)
         setTxStatus('Initiating Transfer on Sui...');
@@ -366,55 +367,7 @@ function App() {
         // remove 0x, then parse pairs of hex chars
         const recipientBytes = bscAddress.slice(2).match(/.{1,2}/g)?.map((byte) => parseInt(byte, 16)) || [];
 
-        // Find SURGE coin object
-        // NOTE: You might need to implement a more robust coin selection (merge/split) if user has multiple coins
-        // For now, we pick the first coin with enough balance
-        const surgeCoinType = `${SUI_NETWORK_CONFIG.testnet.packageId}::surge::SURGE`;
-
-        // We need to query the user's coins. 
-        // Since we are inside a function, we can't easily use a hook.
-        // But we can use the Sui Client from the hook context or import a client if needed.
-        // However, simpler way in dApp Kit is often just to let the wallet handle coin management if the PTB allows,
-        // OR query via RPC.
-        // Here is a logic to "find and split"
-
-        // IMPORTANT: This logic assumes you can get a client instance. 
-        // In a real app, you should pass `suiClient` from `useSuiClient()` hook to this function or component.
-        // For this snippet, I'll add a `useSuiClient` hook at component level and use it here.
-
-        // Placeholder: Assuming you have a client instance `suiClient` available in scope (I will add it to component)
-        const { data: coins } = await suiClient.getCoins({
-          owner: suiAccount.address,
-          coinType: surgeCoinType
-        });
-
-        if (!coins || coins.length === 0) {
-          alert("No SURGE tokens found in wallet");
-          setIsLoading(false);
-          return;
-        }
-
-        // Simple strategy: Pick the first coin with balance >= amount
-        // Better strategy: Merge all coins, then split. Or use Programmable Transaction to do it on-chain (Gas efficient)
-        // Let's do the PTB approach: "Take first coin, if not enough merge others, then split"
-
-        const primaryCoin = tx.object(coins[0].coinObjectId);
-        if (coins.length > 1) {
-          tx.mergeCoins(primaryCoin, coins.slice(1).map(c => tx.object(c.coinObjectId)));
-        }
-
-        const [coinToTransfer] = tx.splitCoins(primaryCoin, [tx.pure.u64(amount)]);
-
-        tx.moveCall({
-          target: `${SUI_NETWORK_CONFIG.testnet.packageId}::surge::lock`,
-          arguments: [
-            tx.object(SUI_NETWORK_CONFIG.testnet.bridgeState), // Surge Bridge State (First arg)
-            coinToTransfer, // The split SURGE coin (Second arg)
-            coinWithBalance({ type: "0x2::sui::SUI", balance: 0 }), // message_fee
-            tx.pure.vector("u8", recipientBytes),
-            tx.object("0x6"), // Clock
-          ],
-        });
+        const tx = await lock(suiAccount.address, amount, recipientBytes);
 
         signAndExecuteTransaction(
           {
@@ -435,7 +388,7 @@ function App() {
                 });
               } catch (e) { console.error(e); }
 
-              setAmount('');
+              setAmount(0);
               setIsLoading(false);
             },
             onError: (err) => {
@@ -554,7 +507,7 @@ function App() {
                 type="number"
                 placeholder="0"
                 value={amount}
-                onChange={(e) => setAmount(e.target.value)}
+                onChange={(e) => setAmount(Number(e.target.value))}
                 className="bg-transparent text-2xl font-medium outline-none w-full placeholder-gray-600"
               />
               <div className="flex items-center gap-2 bg-[#1b1b22] px-3 py-1.5 rounded-full cursor-pointer hover:bg-[#27272e] transition-colors border border-white/5">
@@ -568,7 +521,7 @@ function App() {
                 {messageFee ? `Est. Fee: ${formatUnits(messageFee + (minFee || 0n), 18)} BNB` : 'Loading fee...'}
               </div>
               <button
-                onClick={() => setAmount(displayBalance)}
+                onClick={() => setAmount(Number(displayBalance))}
                 className="text-xs font-medium bg-[#2b2b33] hover:bg-[#3f3f46] text-white px-3 py-1 rounded-full transition-colors"
               >
                 Max

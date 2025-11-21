@@ -17,12 +17,11 @@ export const querySurgeBalance = async (address: string) => {
     return balance;
 };
 
-// public fun unlock(
-//     surge_state: &mut SurgeBridgeState,
-//     state: &mut State,
-//     buf: vector<u8>,
-//     clock: &Clock,
-//     ctx: &mut TxContext,
+// surge_state: &mut SurgeBridgeState,
+// state: &mut State,
+// buf: vector<u8>,
+// clock: &Clock,
+// ctx: &mut TxContext,
 export const unlock = async (
     surgeState: string,
     buf: number[],
@@ -37,7 +36,6 @@ export const unlock = async (
         arguments: [
             tx.object(networkConfig.testnet.bridgeState),
             tx.object(networkConfig.testnet.state),
-            tx.object(networkConfig.testnet.treasuryCap),
             tx.pure.vector("u8", buf),
             tx.object("0x6")
         ],
@@ -45,14 +43,11 @@ export const unlock = async (
     return tx;
 };
 
-// public fun lock(
-//     state: &mut State,
-//     config: &mut SurgeBridgeState,
-//     coin: Coin<SURGE>,
-//     message_fee: Coin<SUI>,
-//     recipient: vector<u8>,
-//     clock: &Clock,
-//     ctx: &mut TxContext,
+// surge_state: &mut SurgeBridgeState,
+// state: &mut State,
+// buf: vector<u8>,
+// clock: &Clock,
+// ctx: &mut TxContext,
 export const lock = async (
     address: string,
     amount: number,
