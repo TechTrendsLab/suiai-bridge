@@ -63,7 +63,7 @@ export const lock = async (
         arguments: [
             tx.object(networkConfig.testnet.state),
             tx.object(networkConfig.testnet.bridgeState),
-            coinWithBalance({type: `${networkConfig.testnet.packageId}::surge::SURGE`, balance: DEFAULT_FEE_AMOUNT}),
+            coinWithBalance({type: `${networkConfig.testnet.packageId}::surge::SURGE`, balance: amount}),
             coinWithBalance({type: "0x2::sui::SUI", balance: DEFAULT_FEE_AMOUNT}),
             tx.pure.vector("u8", recipient),
             tx.object("0x6"),
