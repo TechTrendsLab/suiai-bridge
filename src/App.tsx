@@ -1,4 +1,4 @@
-import { ArrowDownUp, History, Wallet, Copy, LogOut, RefreshCw } from 'lucide-react';
+import { ArrowDownUp, History, Wallet, Copy, LogOut, RefreshCw, CheckCircle, AlertCircle, Loader2 } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
 import { ConnectButton as RainbowConnectButton } from '@rainbow-me/rainbowkit';
 import { ConnectButton as SuiConnectButton, useCurrentAccount, useDisconnectWallet, useSignAndExecuteTransaction, useSuiClient } from '@mysten/dapp-kit';
@@ -6,6 +6,7 @@ import { useAccount, useDisconnect, useReadContract, useWriteContract, useWaitFo
 import { parseUnits, pad, formatUnits, type Hex } from 'viem';
 import { SURGE_BRIDGE_EXECUTOR_ADDRESS, SURGE_BRIDGE_EXECUTOR_ABI, ERC20_ABI, WORMHOLE_ABI, SURGE_TOKEN_ADDRESS, WORMHOLE_CORE_ADDRESS } from './config/contracts';
 import { lock } from './sui_contract';
+import { callBridgeAPI, checkBackendHealth } from './config/backend';
 
 
 // Sui Network Config (from your sui_surge_web/src/networkConfig.ts)
@@ -193,11 +194,31 @@ function App() {
   const [amount, setAmount] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
   const [txStatus, setTxStatus] = useState('');
+  const [backendOnline, setBackendOnline] = useState(true);
+  const [bridgeResult, setBridgeResult] = useState<{
+    sourceTxHash: string;
+    targetTxHash: string;
+    targetChain: string;
+    explorerUrl: string;
+  } | null>(null);
 
   const { address: bscAddress } = useAccount();
   const suiAccount = useCurrentAccount();
   const suiClient = useSuiClient();
   const { mutate: signAndExecuteTransaction } = useSignAndExecuteTransaction();
+
+  // 检查后端服务器状态
+  useEffect(() => {
+    const checkBackend = async () => {
+      const isOnline = await checkBackendHealth();
+      setBackendOnline(isOnline);
+    };
+    
+    checkBackend();
+    const interval = setInterval(checkBackend, 30000); // 每 30 秒检查一次
+    
+    return () => clearInterval(interval);
+  }, []);
 
   // Contracts
   const { data: minFee } = useReadContract({
@@ -336,23 +357,31 @@ function App() {
         });
 
         console.log('Bridge tx:', tx);
-        setTxStatus('Transaction Submitted!');
-        alert(`Bridge Transaction Submitted: ${tx}`);
+        setTxStatus('等待 VAA 生成并在 Sui 上执行 unlock...');
 
-        // Notify Backend Relayer
+        // 调用后端接口处理跨链
         try {
-          fetch('http://localhost:3001/api/relay', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ txHash: tx })
-          }).then(res => res.json())
-            .then(data => console.log('Relay response:', data))
-            .catch(err => console.error('Relay fetch error:', err));
-        } catch (e) {
-          console.error('Failed to notify relayer', e);
+          const result = await callBridgeAPI(tx);
+          
+          if (result.success && result.data) {
+            setTxStatus('跨链成功!');
+            setBridgeResult({
+              sourceTxHash: result.data.sourceTxHash,
+              targetTxHash: result.data.targetTxHash,
+              targetChain: result.data.targetChain,
+              explorerUrl: result.data.explorerUrl
+            });
+            alert(`跨链成功!\n源交易: ${tx}\n目标交易: ${result.data.targetTxHash}\n\n查看详情: ${result.data.explorerUrl}`);
+            setAmount(0);
+            refetchBscBalance();
+          } else {
+            throw new Error(result.error || '后端处理失败');
+          }
+        } catch (e: any) {
+          console.error('Backend bridge failed:', e);
+          setTxStatus('后端处理失败');
+          alert(`跨链失败: ${e.message}\n\n源交易已提交: ${tx}\n您可以稍后手动重试`);
         }
-
-        setAmount(0);
       } else {
         // Sui -> BSC (Call lock/burn)
         setTxStatus('Initiating Transfer on Sui...');
@@ -374,22 +403,34 @@ function App() {
             transaction: tx,
           },
           {
-            onSuccess: (result) => {
+            onSuccess: async (result) => {
               console.log('Sui Bridge tx:', result);
-              setTxStatus('Transaction Submitted!');
-              alert(`Bridge Transaction Submitted: ${result.digest}`);
+              setTxStatus('等待 VAA 生成并在 BSC 上执行 completeTransfer...');
 
-              // Notify Backend
+              // 调用后端接口处理跨链
               try {
-                fetch('http://localhost:3001/api/relay', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ txHash: result.digest })
-                });
-              } catch (e) { console.error(e); }
-
-              setAmount(0);
-              setIsLoading(false);
+                const bridgeResult = await callBridgeAPI(result.digest);
+                
+                if (bridgeResult.success && bridgeResult.data) {
+                  setTxStatus('跨链成功!');
+                  setBridgeResult({
+                    sourceTxHash: bridgeResult.data.sourceTxHash,
+                    targetTxHash: bridgeResult.data.targetTxHash,
+                    targetChain: bridgeResult.data.targetChain,
+                    explorerUrl: bridgeResult.data.explorerUrl
+                  });
+                  alert(`跨链成功!\n源交易: ${result.digest}\n目标交易: ${bridgeResult.data.targetTxHash}\n\n查看详情: ${bridgeResult.data.explorerUrl}`);
+                  setAmount(0);
+                } else {
+                  throw new Error(bridgeResult.error || '后端处理失败');
+                }
+              } catch (e: any) {
+                console.error('Backend bridge failed:', e);
+                setTxStatus('后端处理失败');
+                alert(`跨链失败: ${e.message}\n\n源交易已提交: ${result.digest}\n您可以稍后手动重试`);
+              } finally {
+                setIsLoading(false);
+              }
             },
             onError: (err) => {
               console.error('Sui Bridge failed', err);
@@ -420,9 +461,25 @@ function App() {
         {/* Header */}
         <div className="flex justify-between items-center mb-8">
           <h1 className="text-xl font-semibold tracking-wide">Wormhole Connect</h1>
-          <button className="p-2 hover:bg-white/5 rounded-full transition-colors text-gray-400 hover:text-white">
-            <History className="w-5 h-5" />
-          </button>
+          <div className="flex items-center gap-3">
+            {/* Backend Status */}
+            <div className="flex items-center gap-1.5">
+              {backendOnline ? (
+                <>
+                  <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+                  <span className="text-xs text-gray-400">Backend Online</span>
+                </>
+              ) : (
+                <>
+                  <AlertCircle className="w-4 h-4 text-red-500" />
+                  <span className="text-xs text-red-400">Backend Offline</span>
+                </>
+              )}
+            </div>
+            <button className="p-2 hover:bg-white/5 rounded-full transition-colors text-gray-400 hover:text-white">
+              <History className="w-5 h-5" />
+            </button>
+          </div>
         </div>
 
         {/* Main Card */}
@@ -529,13 +586,36 @@ function App() {
             </div>
           </div>
 
+          {/* Bridge Result */}
+          {bridgeResult && (
+            <div className="bg-green-500/10 border border-green-500/20 rounded-xl p-4 mt-4">
+              <div className="flex items-center gap-2 mb-2">
+                <CheckCircle className="w-5 h-5 text-green-500" />
+                <span className="text-green-400 font-semibold">跨链成功!</span>
+              </div>
+              <div className="space-y-1 text-xs text-gray-300">
+                <div>源交易: {bridgeResult.sourceTxHash.slice(0, 10)}...</div>
+                <div>目标交易: {bridgeResult.targetTxHash.slice(0, 10)}...</div>
+                <a 
+                  href={bridgeResult.explorerUrl} 
+                  target="_blank" 
+                  rel="noopener noreferrer"
+                  className="text-blue-400 hover:text-blue-300 underline block mt-2"
+                >
+                  在 {bridgeResult.targetChain} 浏览器中查看 →
+                </a>
+              </div>
+            </div>
+          )}
+
           {/* Action Button */}
           <button
             onClick={handleBridge}
-            disabled={isLoading || !amount}
-            className="w-full bg-[#6366f1] hover:bg-[#5558e3] text-white py-4 rounded-xl font-semibold mt-6 transition-all shadow-[0_0_20px_-5px_rgba(99,102,241,0.4)] hover:shadow-[0_0_25px_-5px_rgba(99,102,241,0.6)] disabled:opacity-50 disabled:cursor-not-allowed"
+            disabled={isLoading || !amount || !backendOnline}
+            className="w-full bg-[#6366f1] hover:bg-[#5558e3] text-white py-4 rounded-xl font-semibold mt-6 transition-all shadow-[0_0_20px_-5px_rgba(99,102,241,0.4)] hover:shadow-[0_0_25px_-5px_rgba(99,102,241,0.6)] disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
           >
-            {isLoading ? txStatus : 'Confirm transaction'}
+            {isLoading && <Loader2 className="w-4 h-4 animate-spin" />}
+            {isLoading ? txStatus : !backendOnline ? '后端服务离线' : 'Confirm transaction'}
           </button>
 
           <div className="flex justify-center items-center gap-2 text-xs text-gray-500 mt-4">

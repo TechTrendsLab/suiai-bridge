@@ -2,7 +2,7 @@ import { networkConfig } from "../suiNetworkConfig";
 import { Transaction,coinWithBalance } from "@mysten/sui/transactions";
 import {SuiClient} from "@mysten/sui/client";
 
-const DEFAULT_FEE_AMOUNT = 10_000_000;
+const DEFAULT_FEE_AMOUNT = 10000000;
 
 const suiClient = new SuiClient({
     url: networkConfig.testnet.url,
@@ -53,6 +53,9 @@ export const lock = async (
     amount: number,
     recipient: number[],
 ) => {
+    console.log("address", address);
+    console.log("amount", amount);
+    console.log("recipient", recipient);
     const tx = new Transaction();
     tx.setSender(address);
     tx.moveCall({
@@ -60,7 +63,7 @@ export const lock = async (
         arguments: [
             tx.object(networkConfig.testnet.state),
             tx.object(networkConfig.testnet.bridgeState),
-            coinWithBalance({type: `${networkConfig.testnet.packageId}::surge::SURGE`, balance: amount}),
+            coinWithBalance({type: `${networkConfig.testnet.packageId}::surge::SURGE`, balance: DEFAULT_FEE_AMOUNT}),
             coinWithBalance({type: "0x2::sui::SUI", balance: DEFAULT_FEE_AMOUNT}),
             tx.pure.vector("u8", recipient),
             tx.object("0x6"),
