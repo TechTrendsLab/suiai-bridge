@@ -2,7 +2,7 @@ import { ArrowDownUp, History, Wallet, Copy, LogOut, RefreshCw, CheckCircle, Ale
 import { useState, useRef, useEffect } from 'react';
 import { ConnectButton as RainbowConnectButton } from '@rainbow-me/rainbowkit';
 import { ConnectButton as SuiConnectButton, useCurrentAccount, useDisconnectWallet, useSignAndExecuteTransaction, useSuiClient } from '@mysten/dapp-kit';
-import { useAccount, useDisconnect, useReadContract, useWriteContract } from 'wagmi';
+import { useAccount, useDisconnect, useReadContract, useWriteContract, usePublicClient } from 'wagmi';
 import { parseUnits, pad, formatUnits, type Hex } from 'viem';
 import { SURGE_BRIDGE_EXECUTOR_ADDRESS, SURGE_BRIDGE_EXECUTOR_ABI, ERC20_ABI, WORMHOLE_ABI, SURGE_TOKEN_ADDRESS, WORMHOLE_CORE_ADDRESS } from './config/contracts';
 import { lock } from './sui_contract';
@@ -205,10 +205,10 @@ function App() {
       const isOnline = await checkBackendHealth();
       setBackendOnline(isOnline);
     };
-    
+
     checkBackend();
     const interval = setInterval(checkBackend, 30000); // 每 30 秒检查一次
-    
+
     return () => clearInterval(interval);
   }, []);
 
@@ -231,12 +231,15 @@ function App() {
     functionName: 'decimals',
   });
 
-  const { data: allowance, refetch: refetchAllowance } = useReadContract({
+  const { data: allowance, refetch: refetchAllowance, isLoading: isAllowanceLoading } = useReadContract({
     address: SURGE_TOKEN_ADDRESS,
     abi: ERC20_ABI,
     functionName: 'allowance',
     args: bscAddress && SURGE_BRIDGE_EXECUTOR_ADDRESS ? [bscAddress, SURGE_BRIDGE_EXECUTOR_ADDRESS] : undefined,
-    query: { enabled: !!bscAddress }
+    query: {
+      enabled: !!bscAddress,
+      refetchInterval: 5000
+    }
   });
 
   const { data: balance, refetch: refetchBscBalance } = useReadContract({
@@ -281,6 +284,17 @@ function App() {
   }, [suiAccount, suiClient, sourceChain]);
 
   const { writeContractAsync } = useWriteContract();
+  const publicClient = usePublicClient();
+
+  const amountNum = parseFloat(amount);
+  const amountWei = sourceChain === 'BSC' && amount && !isNaN(amountNum) && decimals
+    ? parseUnits(amount, decimals)
+    : 0n;
+
+  const isApproveNeeded = sourceChain === 'BSC' &&
+    allowance !== undefined &&
+    amountWei > 0n &&
+    allowance < amountWei;
 
   const handleSwapChains = () => {
     setSourceChain(destChain);
@@ -294,8 +308,6 @@ function App() {
   }
 
   const handleBridge = async () => {
-    const amountNum = parseFloat(amount);
-    
     if (!amount || isNaN(amountNum) || amountNum <= 0 || !bscAddress || !suiAccount) {
       alert('Please connect wallets and enter a valid amount');
       return;
@@ -311,10 +323,31 @@ function App() {
 
     try {
       if (sourceChain === 'BSC') {
-        const amountWei = parseUnits(amount, decimals || 9);
+        // 获取最新的 allowance，覆盖默认缓存值
+        const { data: latestAllowance } = await refetchAllowance();
+        const currentAllowance = latestAllowance !== undefined ? latestAllowance : allowance;
 
-        // Check Allowance
-        if (!allowance || allowance < amountWei) {
+        if (decimals === undefined || currentAllowance === undefined) {
+          console.error('Missing contract data', { decimals, currentAllowance });
+          alert('正在加载合约数据，请稍候...');
+          setIsLoading(false);
+          return;
+        }
+
+        // 基于最新 allowance 判断是否需要 Approve
+        const needApprove = currentAllowance < amountWei;
+
+        console.log('Debug BSC Bridge:', {
+          amount,
+          amountWei,
+          currentAllowance,
+          needApprove,
+          messageFee,
+          minFee,
+          targetAddressBytes32: pad(suiAccount.address as Hex, { size: 32 })
+        });
+
+        if (needApprove) {
           setTxStatus('Approving...');
           const approveTx = await writeContractAsync({
             address: SURGE_TOKEN_ADDRESS,
@@ -322,18 +355,16 @@ function App() {
             functionName: 'approve',
             args: [SURGE_BRIDGE_EXECUTOR_ADDRESS, amountWei]
           });
-          // We ideally should wait for receipt here, but for simplicity we proceed or could add a wait
+
           console.log('Approve tx:', approveTx);
+          setTxStatus('Waiting for approval confirmation...');
 
-          setTxStatus('Waiting for approval...');
-          // NOTE: properly waiting requires the hash which we have. 
-          // But we can't call useWaitForTransactionReceipt dynamically here easily without effect.
-          // For this demo, I'll just assume the user might need to confirm two transactions or I just fire the second one.
-          // However, firing second immediately usually fails due to nonce or allowance not updated on node.
+          if (publicClient) {
+            await publicClient.waitForTransactionReceipt({ hash: approveTx });
+          }
 
-          alert("Please wait for Approval transaction to confirm, then click Confirm again.");
+          await refetchAllowance();
           setIsLoading(false);
-          refetchAllowance();
           return;
         }
 
@@ -356,7 +387,7 @@ function App() {
         // 调用后端接口处理跨链
         try {
           const result = await callBridgeAPI(tx);
-          
+
           if (result.success && result.data) {
             setTxStatus('跨链成功!');
             setBridgeResult({
@@ -375,6 +406,8 @@ function App() {
           console.error('Backend bridge failed:', e);
           setTxStatus('后端处理失败');
           alert(`跨链失败: ${e.message}\n\n源交易已提交: ${tx}\n您可以稍后手动重试`);
+        } finally {
+          setIsLoading(false);
         }
       } else {
         // Sui -> BSC (Call lock/burn)
@@ -409,7 +442,7 @@ function App() {
               // 调用后端接口处理跨链
               try {
                 const bridgeResult = await callBridgeAPI(result.digest);
-                
+
                 if (bridgeResult.success && bridgeResult.data) {
                   setTxStatus('跨链成功!');
                   setBridgeResult({
@@ -444,7 +477,13 @@ function App() {
         return; // 提前返回，避免执行 finally 块
       }
     } catch (err: any) {
-      console.error(err);
+      console.error('Transaction Error Details:', {
+        message: err.message,
+        code: err.code,
+        data: err.data,
+        cause: err.cause,
+        fullError: err
+      });
       setTxStatus('Error');
       alert(err.message || 'Transaction failed');
       setIsLoading(false);
@@ -469,7 +508,7 @@ function App() {
   return (
     <div className="min-h-screen bg-[#020205] text-white flex items-center justify-center p-4 font-sans">
       {isLoading && <LoadingOverlay />}
-      
+
       <div className="w-full max-w-[480px] bg-[#0f1014] p-6 rounded-3xl border border-white/5 shadow-2xl">
         {/* Header */}
         <div className="flex justify-between items-center mb-8">
@@ -616,9 +655,9 @@ function App() {
               <div className="space-y-1 text-xs text-gray-300">
                 <div>源交易: {bridgeResult.sourceTxHash.slice(0, 10)}...</div>
                 <div>目标交易: {bridgeResult.targetTxHash.slice(0, 10)}...</div>
-                <a 
-                  href={bridgeResult.explorerUrl} 
-                  target="_blank" 
+                <a
+                  href={bridgeResult.explorerUrl}
+                  target="_blank"
                   rel="noopener noreferrer"
                   className="text-blue-400 hover:text-blue-300 underline block mt-2"
                 >
@@ -635,7 +674,7 @@ function App() {
             className="w-full bg-[#6366f1] hover:bg-[#5558e3] text-white py-4 rounded-xl font-semibold mt-6 transition-all shadow-[0_0_20px_-5px_rgba(99,102,241,0.4)] hover:shadow-[0_0_25px_-5px_rgba(99,102,241,0.6)] disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
           >
             {isLoading && <Loader2 className="w-4 h-4 animate-spin" />}
-            {isLoading ? txStatus : !backendOnline ? '后端服务离线' : 'Confirm transaction'}
+            {isLoading ? txStatus : !backendOnline ? '后端服务离线' : isApproveNeeded ? 'Approve' : 'Confirm transaction'}
           </button>
 
           <div className="flex justify-center items-center gap-2 text-xs text-gray-500 mt-4">
