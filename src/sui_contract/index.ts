@@ -50,7 +50,7 @@ export const unlock = async (
 // ctx: &mut TxContext,
 export const lock = async (
     address: string,
-    amount: number,
+    amount: bigint,
     recipient: number[],
 ) => {
     console.log("address", address);
@@ -58,6 +58,7 @@ export const lock = async (
     console.log("recipient", recipient);
     const tx = new Transaction();
     tx.setSender(address);
+    // Convert amount to string for coinWithBalance (it accepts string | bigint | number)
     tx.moveCall({
         target: `${networkConfig.testnet.packageId}::surge::lock`,
         arguments: [

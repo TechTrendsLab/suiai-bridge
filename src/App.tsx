@@ -2,7 +2,7 @@ import { ArrowDownUp, History, Wallet, Copy, LogOut, RefreshCw, CheckCircle, Ale
 import { useState, useRef, useEffect } from 'react';
 import { ConnectButton as RainbowConnectButton } from '@rainbow-me/rainbowkit';
 import { ConnectButton as SuiConnectButton, useCurrentAccount, useDisconnectWallet, useSignAndExecuteTransaction, useSuiClient } from '@mysten/dapp-kit';
-import { useAccount, useDisconnect, useReadContract, useWriteContract, useWaitForTransactionReceipt } from 'wagmi';
+import { useAccount, useDisconnect, useReadContract, useWriteContract } from 'wagmi';
 import { parseUnits, pad, formatUnits, type Hex } from 'viem';
 import { SURGE_BRIDGE_EXECUTOR_ADDRESS, SURGE_BRIDGE_EXECUTOR_ABI, ERC20_ABI, WORMHOLE_ABI, SURGE_TOKEN_ADDRESS, WORMHOLE_CORE_ADDRESS } from './config/contracts';
 import { lock } from './sui_contract';
@@ -386,11 +386,16 @@ function App() {
           return;
         }
 
+        // Convert amount to Sui's smallest unit (9 decimals for SURGE token)
+        // Similar to parseUnits for BSC, but for Sui we need to multiply by 10^9
+        const SUI_DECIMALS = 9;
+        const amountInSmallestUnit = BigInt(Math.floor(amountNum * Math.pow(10, SUI_DECIMALS)));
+
         // Convert BSC address to bytes array for Move vector<u8>
         // remove 0x, then parse pairs of hex chars
         const recipientBytes = bscAddress.slice(2).match(/.{1,2}/g)?.map((byte) => parseInt(byte, 16)) || [];
 
-        const tx = await lock(suiAccount.address, amountNum, recipientBytes);
+        const tx = await lock(suiAccount.address, amountInSmallestUnit, recipientBytes);
 
         signAndExecuteTransaction(
           {
@@ -434,12 +439,14 @@ function App() {
             }
           }
         );
+        // 注意：这里不设置 setIsLoading(false)，因为 signAndExecuteTransaction 是异步的
+        // loading 状态会在 onSuccess 或 onError 回调中关闭
+        return; // 提前返回，避免执行 finally 块
       }
     } catch (err: any) {
       console.error(err);
       setTxStatus('Error');
       alert(err.message || 'Transaction failed');
-    } finally {
       setIsLoading(false);
     }
   };
